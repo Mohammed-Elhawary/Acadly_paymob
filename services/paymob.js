@@ -1,10 +1,29 @@
 const axios = require("axios");
 
+function resolvePaymobApiKey() {
+  return (process.env.PAYMOB_API_KEY || process.env.PAYMOB_SECRET_KEY || "").trim();
+}
+
+function resolveCardIntegrationId() {
+  return (
+    process.env.PAYMOB_INTEGRATION_ID ||
+    process.env.PAYMOB_CARD_INTEGRATION_ID ||
+    ""
+  ).trim();
+}
+
 async function getAuthToken() {
+  const apiKey = resolvePaymobApiKey();
+  if (!apiKey) {
+    throw new Error(
+      "Missing PAYMOB_API_KEY or PAYMOB_SECRET_KEY in Vercel environment."
+    );
+  }
+
   const response = await axios.post(
     "https://accept.paymob.com/api/auth/tokens",
     {
-      api_key: process.env.PAYMOB_API_KEY,
+      api_key: apiKey,
     }
   );
 
@@ -36,6 +55,13 @@ async function createOrder(token, amount) {
   }
 }
 async function generatePaymentKey(token, orderId, amount) {
+  const integrationId = Number(resolveCardIntegrationId());
+  if (!Number.isInteger(integrationId) || integrationId <= 0) {
+    throw new Error(
+      "Missing or invalid PAYMOB_INTEGRATION_ID or PAYMOB_CARD_INTEGRATION_ID in Vercel environment."
+    );
+  }
+
   const response = await axios.post(
     "https://accept.paymob.com/api/acceptance/payment_keys",
     {
@@ -44,7 +70,7 @@ async function generatePaymentKey(token, orderId, amount) {
       expiration: 3600,
       order_id: orderId,
       currency: "EGP",
-      integration_id: Number(process.env.PAYMOB_INTEGRATION_ID),
+      integration_id: integrationId,
 
       billing_data: {
         first_name: "Test",
