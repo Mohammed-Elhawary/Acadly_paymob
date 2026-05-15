@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1061895280919",
+    "project_id": "batu-7809b",
+    "storage_bucket": "batu-7809b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1061895280919:android:05a355afdeb56ed2d3ff52",
+        "android_client_info": {
+          "package_name": "com.example.batu"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyATxrcd7b9KaPauCrUrV-SU41C5CmhCTgQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
