@@ -109,19 +109,32 @@ async function verifyTransaction(authToken, transactionId) {
 }
 
 /**
- * Retrieve all transactions belonging to a Paymob order.
- * Returns an array of transaction objects.
+ * Retrieve the latest transaction belonging to a Paymob order.
+ * Returns an array of transaction objects (containing 0 or 1 item) to match the expected format.
  */
 async function getOrderTransactions(authToken, orderId) {
-  const response = await axios.get(
-    `${PAYMOB_BASE}/ecommerce/orders/${orderId}/transactions`,
-    { headers: { Authorization: `Bearer ${authToken}` } }
-  );
-  // API returns a paginated object { results: [...] } or a plain array
-  const data = response.data;
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data.results)) return data.results;
-  return [];
+  try {
+    const response = await axios.post(
+      `${PAYMOB_BASE}/ecommerce/orders/transaction_inquiry`,
+      {
+        auth_token: authToken,
+        order_id: Number(orderId)
+      }
+    );
+
+    // API returns the transaction object directly
+    if (response.data && response.data.id) {
+      return [response.data];
+    }
+    return [];
+  } catch (error) {
+    // Paymob might return 404 if no transaction exists for the order yet
+    if (error.response && error.response.status === 404) {
+      return [];
+    }
+    console.log("TRANSACTION INQUIRY ERROR:", error.response?.data || error.message);
+    throw error;
+  }
 }
 
 module.exports = { getAuthToken, createOrder, generatePaymentKey, verifyTransaction, getOrderTransactions };

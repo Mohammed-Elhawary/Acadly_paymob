@@ -7,6 +7,8 @@ const {
   getOrderTransactions,
 } = require("../services/paymob");
 const { logTransaction } = require("../utils/logger");
+const { prepareStudentSubscriptionUpdate } = require("../services/subscriptionService");
+const { recordSuccessfulPayment, establishPaymentDocument } = require("../services/paymentService");
 
 exports.createPayment = async (req, res) => {
   try {
@@ -24,22 +26,7 @@ exports.createPayment = async (req, res) => {
     console.log("PaymentToken:", paymentToken);
 
     try {
-      await db.collection("payments").doc(orderId.toString()).set({
-        sessionId: sessionId || "web_session",
-        studentId: studentId || "unknown",
-        studentName: studentName || "Test Student",
-        amount: amount,
-        appliedAmount: amount,
-        currency: "EGP",
-        status: "pending",
-        paymentStatus: "pending",
-        paymentMethod: "card",
-        source: "paymob",
-        initiatedByRole: "student",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        paidAt: null
-      });
+      await establishPaymentDocument(db, { id: orderId, amount, studentId, studentName }, sessionId);
     } catch (firestoreError) {
       console.warn("Firestore payment record skipped:", firestoreError.message);
     }
@@ -71,13 +58,13 @@ exports.webhook = async (req, res) => {
         const orderDoc = await orderRef.get();
         if (!orderDoc.exists) {
           console.warn("Webhook triggered but order not found in firestore:", orderId);
-          return res.sendStatus(200);
+          return res.status(200).send('OK');
         }
 
         const orderData = orderDoc.data();
         if (orderData.status === "completed" || orderData.paymentStatus === "paid") {
           console.log("Order already marked as paid:", orderId);
-          return res.sendStatus(200);
+          return res.status(200).send('OK');
         }
 
         const studentId = orderData.studentId;
@@ -98,6 +85,20 @@ exports.webhook = async (req, res) => {
 
             const batch = db.batch();
 
+            const billingCycle = sData.feesSubscriptionCycle || "yearly";
+            let feesNextDueDate = sData.feesNextDueDate ? new Date(sData.feesNextDueDate.toDate ? sData.feesNextDueDate.toDate() : sData.feesNextDueDate) : null;
+            if (billingCycle === 'monthly') {
+              const now = new Date();
+              if (!feesNextDueDate || now > feesNextDueDate) {
+                feesNextDueDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+              }
+            } else if (billingCycle === 'yearly') {
+              const now = new Date();
+              if (!feesNextDueDate || now > feesNextDueDate) {
+                feesNextDueDate = new Date(now.getFullYear() + 1, now.getMonth(), 1);
+              }
+            }
+
             // Update student
             batch.update(studentRef, {
               paidFees: nextPaid,
@@ -109,7 +110,8 @@ exports.webhook = async (req, res) => {
               latestPaymentStatus: "completed",
               latestPaymentAmount: amount,
               latestPaymentUpdatedAt: new Date(),
-              lastPaidAt: new Date()
+              lastPaidAt: new Date(),
+              feesNextDueDate: feesNextDueDate || null
             });
 
             // Student's subcollection payment log
@@ -187,11 +189,11 @@ exports.webhook = async (req, res) => {
       }
     }
 
-    res.sendStatus(200);
+    res.status(200).send('OK');
 
   } catch (error) {
     console.error("Webhook processing error:", error.message);
-    res.sendStatus(500);
+    res.status(500).send('Error');
   }
 };
 
@@ -277,95 +279,44 @@ exports.checkPayment = async (req, res) => {
         status: "invalid",
         reason: `Amount mismatch: expected ${expectedAmountCents}, got ${actualAmountCents}`
       });
-      return res.json({ verified: false, reason: "Amount mismatch" });
+      return res.status(400).json({ error: "Invalid payment amount" });
+    }
+
+    // AUTH CHECK: Ownership verification
+    const studentId = orderData.studentId;
+    if (req.user && req.user.uid !== studentId) {
+      // Only the original user can verify their own payment.
+      return res.status(403).json({ error: "Unauthorized payment access" });
+    }
+
+    // IDEMPOTENCY CHECK
+    if (orderData.lastProcessedTransaction === tId) {
+      return res.status(200).json({ success: true, message: "Already processed", paymentStatus: "paid" });
     }
 
     // 5. Valid! Update Firestore (same batch as webhook)
     const amount = parseFloat(orderData.amount || 0);
-    const studentId = orderData.studentId;
 
     if (studentId && studentId !== "unknown") {
-      const studentRef = db.collection("users").doc(studentId);
-      const studentDoc = await studentRef.get();
+      const batch = db.batch();
 
-      if (studentDoc.exists) {
-        const sData = studentDoc.data();
-        const totalFees = parseFloat(sData.totalFees || sData.feesTotal || sData.tuitionFees || 0);
-        const currentPaid = parseFloat(sData.paidFees || sData.feesPaid || sData.feesCollected || 0);
+      const subResult = await prepareStudentSubscriptionUpdate(
+        db, batch, studentId, amount, { sessionId: orderId.toString() }
+      );
 
-        const nextPaid = currentPaid + amount;
-        const remainingFees = Math.max(0, totalFees - nextPaid);
-        const paymentStatus = remainingFees <= 0.009 ? "paid" : "partially_paid";
-
-        const batch = db.batch();
-
-        batch.update(studentRef, {
-          paidFees: nextPaid,
-          feesPaid: nextPaid,
-          feesCollected: nextPaid,
-          remainingFees: remainingFees,
-          paymentStatus: paymentStatus,
-          latestPaymentSessionId: orderId.toString(),
-          latestPaymentStatus: "completed",
-          latestPaymentAmount: amount,
-          latestPaymentUpdatedAt: new Date(),
-          lastPaidAt: new Date()
-        });
-
-        const studentPaymentRef = studentRef.collection("payments").doc(orderId.toString());
-        batch.set(studentPaymentRef, {
-          sessionId: orderId.toString(),
-          amount: amount,
-          appliedAmount: amount,
-          currency: orderData.currency || "EGP",
-          status: "completed",
-          paymentStatus: "paid",
-          updatedAt: new Date(),
-          paidAt: new Date(),
-          source: "server_verification"
-        }, { merge: true });
-
-        batch.update(orderRef, {
-          status: "completed",
-          paymentStatus: "paid",
-          updatedAt: new Date(),
-          paidAt: new Date(),
-        });
-
-        const parentId = sData.parentId;
-        if (parentId && parentId.trim() !== "") {
-          const parentRef = db.collection("users").doc(parentId);
-          const parentPaymentRef = parentRef.collection("payments").doc(orderId.toString());
-
-          batch.set(parentPaymentRef, {
-            sessionId: orderId.toString(),
-            studentId: studentId,
-            amount: amount,
-            appliedAmount: amount,
-            currency: orderData.currency || "EGP",
-            status: "completed",
-            paymentStatus: "paid",
-            updatedAt: new Date(),
-            paidAt: new Date(),
-            source: "server_verification"
-          }, { merge: true });
-
-          batch.update(parentRef, {
-            latestPaymentSessionId: orderId.toString(),
-            latestPaymentStudentId: studentId,
-            latestPaymentStatus: "completed",
-            latestPaymentAmount: amount,
-            latestPaymentUpdatedAt: new Date()
-          });
-        }
-
+      if (subResult) {
+        await recordSuccessfulPayment(
+          db, batch, orderId, tId, amount, studentId, orderData, subResult.sData,
+          { sessionId: orderId.toString(), source: "server_verification" }
+        );
         await batch.commit();
       } else {
         await orderRef.update({
           status: "completed",
           paymentStatus: "paid",
-          updatedAt: new Date(), // using server JS date works via admin SDK
+          updatedAt: new Date(),
           paidAt: new Date(),
+          lastProcessedTransaction: tId
         });
       }
     } else {
@@ -374,6 +325,7 @@ exports.checkPayment = async (req, res) => {
         paymentStatus: "paid",
         updatedAt: new Date(),
         paidAt: new Date(),
+        lastProcessedTransaction: tId
       });
     }
 
