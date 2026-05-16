@@ -1,5 +1,7 @@
 const axios = require("axios");
 
+const PAYMOB_BASE = "https://accept.paymob.com/api";
+
 function resolvePaymobApiKey() {
   return (process.env.PAYMOB_API_KEY || process.env.PAYMOB_SECRET_KEY || "").trim();
 }
@@ -38,7 +40,7 @@ async function createOrder(token, amount) {
       "https://accept.paymob.com/api/ecommerce/orders",
       {
         auth_token: token,
-        delivery_needed:true,
+        delivery_needed: true,
         amount_cents: Number(amount) * 100,
         currency: "EGP",
         items: [],
@@ -94,4 +96,32 @@ async function generatePaymentKey(token, orderId, amount) {
   return response.data.token;
 }
 
-module.exports = { getAuthToken, createOrder, generatePaymentKey };
+/**
+ * Verify a single Paymob transaction by its numeric ID.
+ * Returns the full transaction object from Paymob.
+ */
+async function verifyTransaction(authToken, transactionId) {
+  const response = await axios.get(
+    `${PAYMOB_BASE}/acceptance/transactions/${transactionId}`,
+    { headers: { Authorization: `Bearer ${authToken}` } }
+  );
+  return response.data;
+}
+
+/**
+ * Retrieve all transactions belonging to a Paymob order.
+ * Returns an array of transaction objects.
+ */
+async function getOrderTransactions(authToken, orderId) {
+  const response = await axios.get(
+    `${PAYMOB_BASE}/ecommerce/orders/${orderId}/transactions`,
+    { headers: { Authorization: `Bearer ${authToken}` } }
+  );
+  // API returns a paginated object { results: [...] } or a plain array
+  const data = response.data;
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.results)) return data.results;
+  return [];
+}
+
+module.exports = { getAuthToken, createOrder, generatePaymentKey, verifyTransaction, getOrderTransactions };
